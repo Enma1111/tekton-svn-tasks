@@ -1,0 +1,146 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: svn-changed
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/categories: Subversion
+    tekton.dev/tags: svn
+    tekton.dev/displayName: "svn changed"
+spec:
+  description: >-
+    Read-only check: reports whether any of the watched paths changed in a
+    Subversion repository between two revisions. Does not check out anything.
+  params:
+    - name: url
+      description: Subversion URL (for example the trunk)
+      type: string
+    - name: from-revision
+      description: Last built revision. Empty or 0 means first build (always changed).
+      type: string
+      default: ""
+    - name: to-revision
+      description: Revision to compare against (number or HEAD)
+      type: string
+      default: HEAD
+    - name: watch-paths
+      description: Comma separated paths relative to url. Empty or "." watches everything.
+      type: string
+      default: ""
+    - name: image
+      type: string
+      default: ghcr.io/enma1111/svn-tools:latest
+  workspaces:
+    - name: basic-auth
+      optional: true
+  results:
+    - name: changed
+      description: '"true" or "false"'
+    - name: head-revision
+      description: The to-revision resolved to a number
+    - name: last-changed-revision
+      description: Newest revision that touched a watched path (0 if none)
+    - name: changed-count
+      description: Number of distinct changed paths inside the watched paths
+  steps:
+    - name: check
+      image: $(params.image)
+      env:
+        - name: PARAM_URL
+          value: $(params.url)
+        - name: PARAM_FROM
+          value: $(params.from-revision)
+        - name: PARAM_TO
+          value: $(params.to-revision)
+        - name: PARAM_WATCH
+          value: $(params.watch-paths)
+        - name: AUTH_BOUND
+          value: $(workspaces.basic-auth.bound)
+        - name: AUTH_PATH
+          value: $(workspaces.basic-auth.path)
+        - name: RES_CHANGED
+          value: $(results.changed.path)
+        - name: RES_HEAD
+          value: $(results.head-revision.path)
+        - name: RES_LAST
+          value: $(results.last-changed-revision.path)
+        - name: RES_COUNT
+          value: $(results.changed-count.path)
+      script: |
+        #!/bin/sh
+        set -eu
+
+        cfg="$(mktemp -d)"
+        tmp="$(mktemp)"
+
+        run_svn() {
+          if [ "$AUTH_BOUND" = "true" ]; then
+            cat "$AUTH_PATH/password" | svn "$@" --config-dir "$cfg" \
+              --non-interactive --no-auth-cache \
+              --username "$(cat "$AUTH_PATH/username")" --password-from-stdin
+          else
+            svn "$@" --config-dir "$cfg" --non-interactive --no-auth-cache
+          fi
+        }
+
+        case "$PARAM_FROM" in
+          *[!0-9]*) echo "from-revision must be a number or empty" >&2; exit 2 ;;
+        esac
+
+        headrev="$(run_svn info --show-item revision -r "$PARAM_TO" "$PARAM_URL")"
+
+        finish() {
+          printf '%s' "$1" > "$RES_CHANGED"
+          printf '%s' "$headrev" > "$RES_HEAD"
+          printf '%s' "$2" > "$RES_LAST"
+          printf '%s' "$3" > "$RES_COUNT"
+          echo "changed=$1 head=$headrev last-changed=$2 count=$3"
+        }
+
+        if [ -z "$PARAM_FROM" ] || [ "$PARAM_FROM" -eq 0 ]; then
+          finish true "$headrev" 0
+          exit 0
+        fi
+        if [ "$PARAM_FROM" -ge "$headrev" ]; then
+          finish false 0 0
+          exit 0
+        fi
+
+        base="$(run_svn info --show-item relative-url "$PARAM_URL")"
+        base="${base#^}"
+        base="${base%/}"
+
+        start=$((PARAM_FROM + 1))
+        run_svn log -v -q -r "$start:$headrev" "$PARAM_URL" > "$tmp"
+
+        out="$(awk -v base="$base" -v watch="$PARAM_WATCH" '
+          BEGIN {
+            n = split(watch, p, ",")
+            if (n == 0) { n = 1; p[1] = "" }
+            for (i = 1; i <= n; i++) {
+              gsub(/^ +| +$/, "", p[i]); sub(/^\/+/, "", p[i]); sub(/\/+$/, "", p[i])
+              w[i] = (p[i] == "" || p[i] == ".") ? base : base "/" p[i]
+            }
+          }
+          /^r[0-9]+ \|/ { rev = substr($1, 2) + 0; next }
+          /^   [AMDR] / {
+            path = substr($0, 6)
+            sub(/ \(from .*\)$/, "", path)
+            for (i = 1; i <= n; i++) {
+              if (path == w[i] || index(path, w[i] "/") == 1) {
+                if (!(path in seen)) { seen[path] = 1; count++ }
+                if (rev > last) last = rev
+                break
+              }
+            }
+          }
+          END { printf "%d %d\n", count, last }
+        ' "$tmp")"
+
+        set -- $out
+        if [ "$1" -gt 0 ]; then
+          finish true "$2" "$1"
+        else
+          finish false 0 0
+        fi

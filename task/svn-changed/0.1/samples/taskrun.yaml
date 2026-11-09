@@ -1,0 +1,18 @@
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  generateName: svn-changed-test-
+spec:
+  taskRef:
+    name: svn-changed
+  params:
+    - name: url
+      value: https://svn.example.org/repo/trunk
+    - name: from-revision
+      value: "100"
+    - name: watch-paths
+      value: "Lexware.Contacts, Core, Directory.Build.props"
+  workspaces:
+    - name: basic-auth
+      secret:
+        secretName: svn-credentials
