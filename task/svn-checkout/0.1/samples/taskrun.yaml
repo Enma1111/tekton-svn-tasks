@@ -1,0 +1,21 @@
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  generateName: svn-checkout-test-
+spec:
+  taskRef:
+    name: svn-checkout
+  params:
+    - name: url
+      value: https://svn.example.org/repo/trunk
+  workspaces:
+    - name: output
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+    - name: basic-auth
+      secret:
+        secretName: svn-credentials

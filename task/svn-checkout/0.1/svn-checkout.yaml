@@ -1,0 +1,82 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: svn-checkout
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/categories: Subversion
+    tekton.dev/tags: svn
+    tekton.dev/displayName: "svn checkout"
+spec:
+  description: >-
+    Checks out (or exports) a path from a Subversion repository into the
+    output workspace and returns the revision.
+  params:
+    - name: url
+      description: Subversion URL
+      type: string
+    - name: revision
+      description: Revision number or HEAD
+      type: string
+      default: HEAD
+    - name: subdirectory
+      description: Subdirectory inside the output workspace
+      type: string
+      default: ""
+    - name: export
+      description: '"true" = svn export (no .svn folders)'
+      type: string
+      default: "false"
+    - name: image
+      type: string
+      default: ghcr.io/enma1111/svn-tools:latest
+  workspaces:
+    - name: output
+    - name: basic-auth
+      optional: true
+  results:
+    - name: revision
+      description: The revision that was fetched
+  steps:
+    - name: checkout
+      image: $(params.image)
+      env:
+        - name: PARAM_URL
+          value: $(params.url)
+        - name: PARAM_REVISION
+          value: $(params.revision)
+        - name: PARAM_SUBDIR
+          value: $(params.subdirectory)
+        - name: PARAM_EXPORT
+          value: $(params.export)
+        - name: AUTH_BOUND
+          value: $(workspaces.basic-auth.bound)
+        - name: AUTH_PATH
+          value: $(workspaces.basic-auth.path)
+        - name: OUTPUT_PATH
+          value: $(workspaces.output.path)
+        - name: RESULT_PATH
+          value: $(results.revision.path)
+  script: |
+        #!/bin/sh
+        set -eu
+        cfg="$(mktemp -d)"
+        run_svn() {
+          if [ "$AUTH_BOUND" = "true" ]; then
+            cat "$AUTH_PATH/password" | svn "$@" --config-dir "$cfg" \
+              --non-interactive --no-auth-cache \
+              --username "$(cat "$AUTH_PATH/username")" --password-from-stdin
+          else
+            svn "$@" --config-dir "$cfg" --non-interactive --no-auth-cache
+          fi
+        }
+        rev="$(run_svn info --show-item revision -r "$PARAM_REVISION" "$PARAM_URL")"
+        dest="$OUTPUT_PATH/$PARAM_SUBDIR"
+        mkdir -p "$dest"
+        if [ "$PARAM_EXPORT" = "true" ]; then
+          run_svn export --force -r "$rev" "$PARAM_URL" "$dest"
+        else
+          run_svn checkout -r "$rev" "$PARAM_URL" "$dest"
+        fi
+        printf '%s' "$rev" > "$RESULT_PATH"
