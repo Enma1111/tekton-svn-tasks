@@ -58,7 +58,7 @@ spec:
           value: $(workspaces.output.path)
         - name: RESULT_PATH
           value: $(results.revision.path)
-  script: |
+      script: |
         #!/bin/sh
         set -eu
         cfg="$(mktemp -d)"
